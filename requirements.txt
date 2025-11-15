@@ -1,3 +1,0 @@
-python-chess
-torch
-requests
