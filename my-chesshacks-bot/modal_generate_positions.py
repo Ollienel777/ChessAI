@@ -1,158 +1,66 @@
 import modal
 
-app = modal.App("lichess-pipeline")
+app = modal.App("chess-training")
 
-# Shared volume for positions and labeled positions
+# Shared volume for positions / labels / model
 volume = modal.Volume.from_name("lichess-data", create_if_missing=True)
 
-# --------- IMAGE FOR POSITION GENERATION (Lichess DB) ---------
-image_gen = (
+image = (
     modal.Image.debian_slim()
-    .pip_install("python-chess", "zstandard", "requests")
+    .pip_install("torch", "python-chess", "numpy")
 )
 
-@app.function(image=image_gen, volumes={"/data": volume}, timeout=60 * 60)
-def generate_positions(
-    url: str,
-    max_positions: int = 1_000_000,
-    min_elo: int = 1500,
-):
-    """
-    Stream a lichess .pgn.zst file from `url`, extract up to `max_positions`
-    midgame positions into /data/positions.csv (in the Modal volume).
-    """
-    import io
-    import csv
-    import random
-    import requests
-    import zstandard as zstd
-    import chess.pgn
-    from pathlib import Path
-
-    out_dir = Path("/data")
-    out_dir.mkdir(exist_ok=True)
-    out_path = out_dir / "positions.csv"
-
-    f_out = out_path.open("w", encoding="utf-8", newline="")
-    writer = csv.writer(f_out)
-    writer.writerow(["fen"])
-
-    resp = requests.get(url, stream=True)
-    resp.raise_for_status()
-
-    dctx = zstd.ZstdDecompressor()
-    stream_reader = dctx.stream_reader(resp.raw)
-    text_stream = io.TextIOWrapper(stream_reader, encoding="utf-8")
-
-    num_positions = 0
-    game_counter = 0
-
-    while num_positions < max_positions:
-        game = chess.pgn.read_game(text_stream)
-        if game is None:
-            break  # end of file
-
-        game_counter += 1
-
-        # Filter by player Elo if headers present
-        try:
-            white_elo = int(game.headers.get("WhiteElo", "0"))
-            black_elo = int(game.headers.get("BlackElo", "0"))
-        except ValueError:
-            continue
-
-        if white_elo < min_elo or black_elo < min_elo:
-            continue
-
-        moves = list(game.mainline_moves())
-        if len(moves) < 10:
-            continue
-
-        # midgame corridor in plies (e.g. moves 10–60)
-        ply_start = min(20, len(moves))
-        ply_end = min(120, len(moves))
-        if ply_start >= ply_end:
-            continue
-
-        num_samples_for_game = 2
-        for _ in range(num_samples_for_game):
-            ply_index = random.randint(ply_start, ply_end - 1)
-            board = game.board()
-            for m in moves[:ply_index]:
-                board.push(m)
-
-            writer.writerow([board.fen()])
-            num_positions += 1
-            if num_positions >= max_positions:
-                break
-
-        if game_counter % 1000 == 0:
-            print(f"Processed {game_counter} games, collected {num_positions} positions")
-
-    f_out.close()
-    print(f"Done. Wrote {num_positions} positions to {out_path}")
-
-
-# --------- IMAGE FOR STOCKFISH LABELING ---------
-image_sf = (
-    modal.Image.debian_slim()
-    .apt_install("stockfish")            # installs the engine binary
-    .pip_install("python-chess")
+@app.function(
+    image=image,
+    volumes={"/modal_data": volume},  # mount Modal volume
+    mounts=[                         # mount your *local* src/ into the container
+        modal.Mount.from_local_dir("src", remote_path="/root/src")
+    ],
+    timeout=60 * 105,
 )
-
-@app.function(image=image_sf, volumes={"/data": volume}, timeout=60 * 60)
-def label_with_stockfish(max_positions: int = 1_000_000, depth: int = 12):
+def train_remote(epochs: int = 10, batch_size: int = 256, lr: float = 1e-3):
     """
-    Read /data/positions.csv, evaluate with Stockfish, and write /data/sf_positions.csv.
+    Run src/train.py inside Modal, using sf_positions.csv from the lichess-data volume.
+    Saves valuenet.pt back into the volume.
     """
-    import csv
+    import shutil
     from pathlib import Path
-    import chess
-    import chess.engine
+    import sys
 
-    positions_path = Path("/data") / "positions.csv"
-    out_path = Path("/data") / "sf_positions.csv"
+    # We KNOW src is at /root/src inside the container
+    project_root = Path("/root")
+    src_dir = project_root / "src"
+    data_dir = project_root / "data"
+    data_dir.mkdir(exist_ok=True)
 
-    if not positions_path.exists():
-        raise FileNotFoundError(
-            f"{positions_path} not found. Did you run generate_positions into the same volume?"
-        )
+    # Where the Modal volume is mounted
+    volume_dir = Path("/modal_data")
 
-    engine_path = "/usr/games/stockfish"
-    engine = chess.engine.SimpleEngine.popen_uci([engine_path])
-    print("Stockfish engine started.")
+    # 1) Copy sf_positions.csv from volume into project data dir
+    sf_src = volume_dir / "sf_positions.csv"
+    if not sf_src.exists():
+        raise FileNotFoundError(f"{sf_src} not found in Modal volume 'lichess-data'")
 
-    def score_to_value(score: chess.engine.PovScore) -> float:
-        s = score.pov(chess.WHITE)
-        if s.is_mate():
-            return 1.0 if s.mate() > 0 else -1.0
-        cp = s.score() or 0
-        pawns = max(-3.0, min(3.0, cp / 100.0))
-        return pawns / 3.0  # normalize ~[-1, 1]
+    sf_dst = data_dir / "sf_positions.csv"
+    print(f"[INFO] Copying {sf_src} -> {sf_dst}")
+    shutil.copy(sf_src, sf_dst)
 
-    with positions_path.open("r", encoding="utf-8") as f_in, \
-         out_path.open("w", encoding="utf-8", newline="") as f_out:
+    # 2) Import your local train() and run it
+    sys.path.insert(0, str(project_root))  # lets us import src.*
 
-        reader = csv.DictReader(f_in)
-        writer = csv.DictWriter(f_out, fieldnames=["fen", "sf_score"])
-        writer.writeheader()
+    print(f"[INFO] sys.path[0]: {sys.path[0]}")
+    from src.train import train as local_train
 
-        count = 0
-        for row in reader:
-            fen = row["fen"]
-            board = chess.Board(fen)
+    print(f"[INFO] Starting training: epochs={epochs}, batch_size={batch_size}, lr={lr}")
+    local_train(epochs=epochs, batch_size=batch_size, lr=lr)
 
-            info = engine.analyse(board, chess.engine.Limit(depth=depth))
-            val = score_to_value(info["score"])
+    # 3) Copy resulting valuenet.pt back into the Modal volume
+    model_path = src_dir / "valuenet.pt"
+    if not model_path.exists():
+        raise FileNotFoundError(f"{model_path} not found after training")
 
-            writer.writerow({"fen": fen, "sf_score": val})
-            count += 1
+    model_dst = volume_dir / "valuenet.pt"
+    print(f"[INFO] Copying {model_path} -> {model_dst}")
+    shutil.copy(model_path, model_dst)
 
-            if count % 1000 == 0:
-                print(f"Labeled {count} positions")
-
-            if count >= max_positions:
-                break
-
-    engine.quit()
-    print(f"Done. Wrote {count} labeled positions to {out_path}")
+    print("[INFO] Training complete and model saved to volume.")

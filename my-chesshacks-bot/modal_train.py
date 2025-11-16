@@ -1,42 +1,55 @@
-# chess-value-trainer/modal_train.py
-
 import modal
 
-# Name your app
-app = modal.App("chess-value-trainer")
+app = modal.App("chess-training")
 
-# Define the environment image (Python + requirements.txt)
+volume = modal.Volume.from_name("lichess-data", create_if_missing=True)
+
 image = (
-    modal.Image.debian_slim()
+    modal.Image.debian_slim(python_version="3.11")
     .pip_install("torch", "python-chess", "numpy")
+    .add_local_dir(".", remote_path="/project")
 )
 
-# If you want to run on GPU, set gpu="any" or a specific type like "T4"
-# For CPU only, remove gpu=...
-@app.function(image=image, gpu="any", timeout=60 * 60)
-def run_training(epochs: int = 10, batch_size: int = 256, lr: float = 1e-3):
+@app.function(image=image, volumes={"/modal_data": volume}, timeout=60 * 180)
+def train_remote(epochs: int = 10, batch_size: int = 256, lr: float = 1e-3):
     """
-    This function runs inside Modal's cloud.
-    It imports your train.py and calls train().
+    Run src/train.py inside Modal, using sf_positions.csv from the lichess-data volume.
+    Saves/updates /modal_data/valuenet.pt every epoch.
     """
-    import os
+    import shutil
     from pathlib import Path
+    import sys
 
-    # Ensure we're in the project root inside the container
-    project_root = Path(__file__).resolve().parent
-    os.chdir(project_root)
+    project_root = Path("/project")
+    src_dir = project_root / "src"
+    data_dir = project_root / "data"
+    data_dir.mkdir(exist_ok=True)
 
-    # Now we can import from src/ because it's in the same directory
-    from src.train import train
+    volume_dir = Path("/modal_data")
 
-    print("Starting training on Modal...")
-    print(f"epochs={epochs}, batch_size={batch_size}, lr={lr}")
+    # 1) Copy sf_positions.csv from volume into project data dir
+    sf_src = volume_dir / "sf_positions.csv"
+    if not sf_src.exists():
+        raise FileNotFoundError(f"{sf_src} not found in Modal volume 'lichess-data'")
 
-    train(epochs=epochs, batch_size=batch_size, lr=lr)
+    sf_dst = data_dir / "sf_positions.csv"
+    print(f"[INFO] Copying {sf_src} -> {sf_dst}")
+    shutil.copy(sf_src, sf_dst)
 
-    # Model will be saved to src/valuenet.pt
-    out_path = project_root / "src" / "valuenet.pt"
-    if out_path.exists():
-        print(f"Training complete. Saved model to {out_path}")
-    else:
-        print("WARNING: Training finished but valuenet.pt was not found.")
+    # 2) Import your local train() and run it, writing checkpoints directly to the volume
+    sys.path.append(str(src_dir))
+    from train import train as local_train
+
+    out_path = volume_dir / "valuenet.pt"
+    print(f"[INFO] Starting training to {out_path}: epochs={epochs}, batch_size={batch_size}, lr={lr}")
+
+    local_train(
+        epochs=epochs,
+        batch_size=batch_size,
+        lr=lr,
+        csv_path=sf_dst,
+        out_path=out_path,
+        checkpoint_every=1,  # ✅ save each epoch
+    )
+
+    print("[INFO] Training complete; latest weights are in the volume.")
