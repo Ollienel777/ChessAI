@@ -72,13 +72,9 @@ def train(epochs: int = 10, batch_size: int = 256, lr: float = 1e-3):
             preds = model(x).squeeze(1)               # (batch,)
 
             error = preds - y                         # (batch,)
-            base_loss = error ** 2                   # per-sample MSE
-
-            # weights in [1, 3]: positions with |eval|≈1 (big advantage/disadvantage)
-            # get up to 3x the weight
-            weights = 1.0 + 2.0 * torch.abs(y)       # (batch,)
+            base_loss = error ** 2                    # per-sample MSE
+            weights = 1.0 + 2.0 * torch.abs(y)
             loss = (weights * base_loss).mean()
-            # ---------------------------------------------------------------------------
 
             loss.backward()
             opt.step()
@@ -88,8 +84,15 @@ def train(epochs: int = 10, batch_size: int = 256, lr: float = 1e-3):
         avg_loss = total_loss / len(dataset)
         print(f"Epoch {epoch}: loss = {avg_loss:.4f}")
 
-    torch.save(model.state_dict(), out_path)
-    print(f"Saved model to {out_path}")
+        # Save checkpoint each epoch
+        checkpoint_path = OUT_PATH.with_name(f"valuenet_epoch_{epoch}.pt")
+        torch.save(model.state_dict(), checkpoint_path)
+        print(f"[INFO] Saved checkpoint: {checkpoint_path}")
+
+    # Also save a final overwrite version
+    torch.save(model.state_dict(), OUT_PATH)
+    print(f"[INFO] Saved final model to {OUT_PATH}")
+
 
 
 if __name__ == "__main__":
