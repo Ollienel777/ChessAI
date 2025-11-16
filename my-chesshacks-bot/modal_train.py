@@ -27,7 +27,7 @@ def train_remote(epochs: int = 10, batch_size: int = 256, lr: float = 1e-3):
 
     volume_dir = Path("/modal_data")
 
-    # 1) Copy sf_positions.csv from volume into project data dir
+    # Copy sf_positions.csv from volume into project data dir
     sf_src = volume_dir / "sf_positions.csv"
     if not sf_src.exists():
         raise FileNotFoundError(f"{sf_src} not found in Modal volume 'lichess-data'")
@@ -36,7 +36,7 @@ def train_remote(epochs: int = 10, batch_size: int = 256, lr: float = 1e-3):
     print(f"[INFO] Copying {sf_src} -> {sf_dst}")
     shutil.copy(sf_src, sf_dst)
 
-    # 2) Import your local train() and run it, writing checkpoints directly to the volume
+    # Import local train() and runs it, writing checkpoints directly to the volume
     sys.path.append(str(src_dir))
     from train import train as local_train
 
@@ -49,7 +49,7 @@ def train_remote(epochs: int = 10, batch_size: int = 256, lr: float = 1e-3):
         lr=lr,
         csv_path=sf_dst,
         out_path=out_path,
-        checkpoint_every=1,  # ✅ save each epoch
+        checkpoint_every=1,  # saves each epoch
     )
 
     print("[INFO] Training complete; latest weights are in the volume.")

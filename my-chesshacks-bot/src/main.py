@@ -10,9 +10,7 @@ from .nn_model import ValueNet, board_to_tensor
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 WEIGHTS_PATH = Path(__file__).with_name("valuenet.pt")
 
-# ------------------------
 # Load neural network
-# ------------------------
 
 try:
     _model = ValueNet().to(DEVICE)
@@ -39,9 +37,7 @@ def evaluate(board: chess.Board) -> float:
 
 INF = 1e9
 
-# ------------------------
-# Search
-# ------------------------
+# Search alphabeta
 
 def eval_terminal(board: chess.Board) -> float:
     """
@@ -136,16 +132,15 @@ def test_func(ctx: GameContext):
         ctx.logProbabilities({})
         raise ValueError("Game over")
 
-    # Work on a COPY so we don't mutate ctx.board during search
+    # works on a copy so we don't mutate ctx.board during search
     board_for_search = live_board.copy()
 
-    # Adjust if too slow / too weak
     SEARCH_DEPTH = 3
 
     # Run search on the copy
     best_move, scores = search_root(board_for_search, depth=SEARCH_DEPTH)
 
-    # Legal moves for the REAL board
+    # legal moves for the real board
     legal_moves = list(live_board.legal_moves)
 
     if not legal_moves:
