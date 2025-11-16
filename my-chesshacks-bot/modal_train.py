@@ -10,7 +10,7 @@ image = (
     .add_local_dir(".", remote_path="/project")
 )
 
-@app.function(image=image, volumes={"/modal_data": volume}, timeout=60 * 180)
+@app.function(image=image, volumes={"/modal_data": volume}, timeout=60 * 600)
 def train_remote(epochs: int = 10, batch_size: int = 256, lr: float = 1e-3):
     """
     Run src/train.py inside Modal, using sf_positions.csv from the lichess-data volume.
